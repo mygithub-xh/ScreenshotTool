@@ -20,8 +20,20 @@ macOS 截图工具，基于 ScreenCaptureKit 构建，提供丰富的截图、�
 
 ## 构建
 
+使用 `build.sh` 脚本一键构建并安装到 `/Applications`：
+
 ```bash
-swift build -c release
+# 构建 release 版本（默认）
+./build.sh
+
+# 构建 debug 版本
+./build.sh debug
+```
+
+脚本会自动编译、打包 `.app` bundle 并安装到 `/Applications`。安装后可从启动台或以下命令启动：
+
+```bash
+open "/Applications/截图工具.app"
 ```
 
 ## 使用

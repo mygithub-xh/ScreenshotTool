@@ -61,7 +61,7 @@ private class CaptureOverlayWindow: NSWindow {
 final class CaptureOverlay: NSObject {
 
     var onComplete: ((CaptureResult) -> Void)?
-    var onAnnotationResult: ((NSImage, AnnotationAction) -> Void)?
+    var onAnnotationResult: ((NSImage, CGImage?, AnnotationAction) -> Void)?
     var onAnnotationCancel: (() -> Void)?
     var onPinAction: ((NSImage, CGRect) -> Void)?
     /// Same as onPinAction but passes the raw CGImage to avoid NSImage
@@ -99,9 +99,9 @@ final class CaptureOverlay: NSObject {
                 self.onComplete?(result)
             }
         }
-        overlayView?.onAnnotationAction = { [weak self] image, action in
+        overlayView?.onAnnotationAction = { [weak self] image, cgImage, action in
             guard let self = self else { return }
-            self.onAnnotationResult?(image, action)
+            self.onAnnotationResult?(image, cgImage, action)
         }
         overlayView?.onAnnotationCancel = { [weak self] in
             guard let self = self else { return }
@@ -186,7 +186,7 @@ private class OverlayView: NSView {
     // MARK: - Callbacks
 
     var onSelectionComplete: ((CaptureResult) -> Void)?
-    var onAnnotationAction: ((NSImage, AnnotationAction) -> Void)?
+    var onAnnotationAction: ((NSImage, CGImage?, AnnotationAction) -> Void)?
     var onAnnotationCancel: (() -> Void)?
     var onPinAction: ((NSImage, CGRect) -> Void)?
     var onPinCGImage: ((CGImage, NSSize, CGRect) -> Void)?
@@ -434,7 +434,7 @@ private class OverlayView: NSView {
                 CGRect(x: r.maxX, y: r.minY, width: bounds.maxX - r.maxX, height: r.height),
                 CGRect(x: bounds.minX, y: r.maxY, width: bounds.width, height: bounds.maxY - r.maxY),
             ]
-            ctx.setFillColor(NSColor.black.withAlphaComponent(0.35).cgColor)
+            ctx.setFillColor(NSColor.black.withAlphaComponent(0.5).cgColor)
             for rect in outsideRects where rect.width > 0 && rect.height > 0 {
                 ctx.fill(rect)
             }
@@ -474,7 +474,7 @@ private class OverlayView: NSView {
             ])
         } else {
             // No selection yet — dim the entire screen
-            ctx.setFillColor(NSColor.black.withAlphaComponent(0.35).cgColor)
+            ctx.setFillColor(NSColor.black.withAlphaComponent(0.5).cgColor)
             ctx.fill(bounds)
         }
 
@@ -538,7 +538,7 @@ private class OverlayView: NSView {
             CGRect(x: r.maxX, y: r.minY, width: bounds.maxX - r.maxX, height: r.height),
             CGRect(x: bounds.minX, y: r.maxY, width: bounds.width, height: bounds.maxY - r.maxY),
         ]
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.35).cgColor)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.5).cgColor)
         for rect in outsideRects where rect.width > 0 && rect.height > 0 {
             ctx.fill(rect)
         }
@@ -635,7 +635,7 @@ private class OverlayView: NSView {
             CGRect(x: localRect.maxX, y: localRect.minY, width: bounds.maxX - localRect.maxX, height: localRect.height),
             CGRect(x: bounds.minX, y: localRect.maxY, width: bounds.width, height: bounds.maxY - localRect.maxY),
         ]
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.25).cgColor)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.4).cgColor)
         for rect in outsideRects where rect.width > 0 && rect.height > 0 {
             ctx.fill(rect)
         }
@@ -672,7 +672,7 @@ private class OverlayView: NSView {
         }
 
         // Dim everything outside the capture rect
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.45).cgColor)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.55).cgColor)
 
         // Draw dim around the capture rect (not over it)
         let outsideRects = [
@@ -689,9 +689,6 @@ private class OverlayView: NSView {
         if let cgImg = capturedCGImage {
             ctx.draw(cgImg, in: cr)
         }
-
-        // Draw highlight dimming (single pass for all highlight rects)
-        drawHighlightDimming(ctx)
 
         // Show selection border, dimensions and resize handles when movable
         if canMoveSelection {
@@ -738,6 +735,10 @@ private class OverlayView: NSView {
                 ctx.setLineDash(phase: 0, lengths: [])
             }
         }
+
+        // Draw highlight dimming last so it correctly dims everything (including
+        // annotations like mosaic, arrows, etc.) outside the highlight rects.
+        drawHighlightDimming(ctx)
 
         // Draw toolbar
         drawToolbar(ctx)
@@ -911,7 +912,7 @@ private class OverlayView: NSView {
         guard !rects.isEmpty else { return }
 
         ctx.saveGState()
-        ctx.setFillColor(NSColor.black.withAlphaComponent(0.35).cgColor)
+        ctx.setFillColor(NSColor.black.withAlphaComponent(0.40).cgColor)
         let path = CGMutablePath()
         path.addRect(cr)
         for rect in rects {
@@ -1854,17 +1855,19 @@ private class OverlayView: NSView {
         }
 
         if id == "save" {
-            guard let image = renderedImage() else { return }
+            guard let (cgImage, _, _) = renderCGImage() else { return }
+            let image = NSImage(cgImage: cgImage, size: capturedImage?.size ?? .zero)
             // Lower level so save panel isn't blocked by overlay
             self.window?.level = .floating
-            onAnnotationAction?(image, .save)
+            onAnnotationAction?(image, cgImage, .save)
             // Don't close — App.swift will close on successful save
             return
         }
 
         if id == "copy" {
-            guard let image = renderedImage() else { return }
-            onAnnotationAction?(image, .copy)
+            guard let (cgImage, _, imageSize) = renderCGImage() else { return }
+            let image = NSImage(cgImage: cgImage, size: imageSize)
+            onAnnotationAction?(image, cgImage, .copy)
             onAnnotationCancel?()
             return
         }
@@ -2050,7 +2053,8 @@ private class OverlayView: NSView {
         let pixelW = baseCGImage.width
         let pixelH = baseCGImage.height
 
-        let displayColorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? baseCGImage.colorSpace!
+        // Render in DeviceRGB to avoid color-matching that shifts pixel values.
+        let displayColorSpace = baseCGImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         guard let ctx = CGContext(
             data: nil,
             width: pixelW,
@@ -2069,22 +2073,7 @@ private class OverlayView: NSView {
         ctx.saveGState()
         ctx.scaleBy(x: sx, y: sy)
 
-        // Draw highlight dimming (single pass for all highlight rects, in image coords)
-        let highlightRects = annotations.filter { $0.tool == .highlight }.map {
-            rectFromPoints($0.startPoint, $0.endPoint)
-        }.filter { !$0.isNull && $0.width > 1 && $0.height > 1 }
-        if !highlightRects.isEmpty {
-            let imageBounds = CGRect(origin: .zero, size: imageSize)
-            ctx.setFillColor(NSColor.black.withAlphaComponent(0.35).cgColor)
-            let path = CGMutablePath()
-            path.addRect(imageBounds)
-            for rect in highlightRects {
-                path.addRect(rect.intersection(imageBounds))
-            }
-            ctx.addPath(path)
-            ctx.drawPath(using: .eoFill)
-        }
-
+        // Draw annotations first (mosaic, arrows, text, etc.)
         for annotation in annotations {
             switch annotation.tool {
             case .arrow, .text, .number, .mosaic, .rectangle, .ellipse:
@@ -2095,10 +2084,38 @@ private class OverlayView: NSView {
                 break
             }
         }
+
+        // Draw highlight dimming last so it correctly dims everything (including
+        // annotations) outside the highlight rects.
+        let highlightRects = annotations.filter { $0.tool == .highlight }.map {
+            rectFromPoints($0.startPoint, $0.endPoint)
+        }.filter { !$0.isNull && $0.width > 1 && $0.height > 1 }
+        if !highlightRects.isEmpty {
+            let imageBounds = CGRect(origin: .zero, size: imageSize)
+            ctx.setFillColor(NSColor.black.withAlphaComponent(0.40).cgColor)
+            let path = CGMutablePath()
+            path.addRect(imageBounds)
+            for rect in highlightRects {
+                path.addRect(rect.intersection(imageBounds))
+            }
+            ctx.addPath(path)
+            ctx.drawPath(using: .eoFill)
+        }
+
         ctx.restoreGState()
 
         guard let resultCGImage = ctx.makeImage() else { return nil }
-        return (resultCGImage, NSSize(width: pixelW, height: pixelH), imageSize)
+
+        // Re-tag with the screen's ICC profile without converting pixel values.
+        // CGImage.copy(colorSpace:) only changes the profile tag, preserving
+        // the DeviceRGB pixel values which already match the display's primaries.
+        let screenCS = { () -> CGColorSpace? in
+            let pt = CGPoint(x: annotationGlobalRect.midX, y: annotationGlobalRect.midY)
+            return NSScreen.screens.first { $0.frame.contains(pt) }?.colorSpace?.cgColorSpace
+                ?? NSScreen.main?.colorSpace?.cgColorSpace
+        }()
+        let taggedCGImage = screenCS.flatMap { resultCGImage.copy(colorSpace: $0) } ?? resultCGImage
+        return (taggedCGImage, NSSize(width: pixelW, height: pixelH), imageSize)
     }
 
     func renderedImage() -> NSImage? {

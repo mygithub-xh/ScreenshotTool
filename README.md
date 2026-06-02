@@ -24,8 +24,6 @@ macOS 截图工具，基于 ScreenCaptureKit 构建，提供丰富的截图、�
 swift build -c release
 ```
 
-构建产物位于 `.build/arm64-apple-macosx/release/ScreenshotTool`。
-
 ## 使用
 
 运行后程序驻留在菜单栏，点击菜单栏图标或按下快捷键开始截图。

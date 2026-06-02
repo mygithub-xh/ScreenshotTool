@@ -188,14 +188,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        overlay.onAnnotationResult = { [weak self] image, action in
+        overlay.onAnnotationResult = { [weak self] image, cgImage, action in
             guard let self = self else { return }
             switch action {
             case .save:
-                self.saveImage(image)
+                self.saveImage(image, cgImage: cgImage)
             case .copy:
                 NSPasteboard.general.clearContents()
-                NSPasteboard.general.writeObjects([image])
+                if let cg = cgImage {
+                    NSPasteboard.general.writeObjects([NSImage(cgImage: cg, size: image.size)])
+                } else {
+                    NSPasteboard.general.writeObjects([image])
+                }
             case .pin:
                 break
             }
@@ -474,29 +478,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Save
 
-    private func saveImage(_ image: NSImage) {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+    private func saveImage(_ image: NSImage, cgImage: CGImage?) {
+        // Use the passed CGImage directly to preserve original color space;
+        // fall back to extracting from NSImage only when CGImage is unavailable.
+        let cgImageToSave: CGImage
+        if let cg = cgImage {
+            cgImageToSave = cg
+        } else if let rep = image.representations.first as? NSBitmapImageRep, let cg = rep.cgImage {
+            cgImageToSave = cg
+        } else if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            cgImageToSave = cg
+        } else {
+            return
+        }
 
         let writePNG: (CGImage, URL) -> Void = { srcImage, url in
-            let w = srcImage.width
-            let h = srcImage.height
-            // Convert to sRGB explicitly before writing
-            let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
-            let ctx = CGContext(
-                data: nil, width: w, height: h,
-                bitsPerComponent: 8, bytesPerRow: 0,
-                space: srgb,
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-            )
-            ctx?.draw(srcImage, in: CGRect(x: 0, y: 0, width: w, height: h))
-            guard let converted = ctx?.makeImage() else { return }
-
             let properties: [CFString: Any] = [
                 kCGImagePropertyDPIWidth: 72,
                 kCGImagePropertyDPIHeight: 72,
             ]
             guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else { return }
-            CGImageDestinationAddImage(destination, converted, properties as CFDictionary)
+            CGImageDestinationAddImage(destination, srcImage, properties as CFDictionary)
             CGImageDestinationFinalize(destination)
         }
 
@@ -504,7 +506,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let dir = defaultSavePath() {
             let filename = "截图_\(formattedDate()).png"
             let url = dir.appendingPathComponent(filename)
-            writePNG(cgImage, url)
+            writePNG(cgImageToSave, url)
             self.currentOverlay?.cleanupOverlay()
             self.currentOverlay = nil
             return
@@ -520,7 +522,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.currentOverlay?.restoreWindowLevel()
                 return
             }
-            writePNG(cgImage, url)
+            writePNG(cgImageToSave, url)
             self?.currentOverlay?.cleanupOverlay()
             self?.currentOverlay = nil
         }
@@ -780,48 +782,48 @@ struct TestCapture {
                 let capturedNSImage = NSImage(cgImage: cropped, size: NSSize(width: cropW / cropScale, height: cropH / cropScale))
                 print("Step2 cropped: \(cropped.width)x\(cropped.height) nsImage.size=\(capturedNSImage.size)")
 
-                // Step 3: Render using the NEW CGContext approach (same as renderedImage)
-                guard let srcCGImage = capturedNSImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-                    print("TEST FAIL: cgImage")
-                    semaphore.signal()
-                    return
-                }
-                let pixelW = srcCGImage.width
-                let pixelH = srcCGImage.height
-                let colorSpace = srcCGImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+                // Step 3: Render using the screen's actual color space (not DeviceRGB)
+                let pixelW = cropped.width
+                let pixelH = cropped.height
+                let screenColorSpace = screen.colorSpace?.cgColorSpace ?? cropped.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
                 guard let ctx = CGContext(
                     data: nil, width: pixelW, height: pixelH,
                     bitsPerComponent: 8, bytesPerRow: 0,
-                    space: colorSpace,
+                    space: screenColorSpace,
                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
                 ) else {
                     print("TEST FAIL: CGContext")
                     semaphore.signal()
                     return
                 }
-                ctx.draw(srcCGImage, in: CGRect(x: 0, y: 0, width: pixelW, height: pixelH))
+                ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: pixelW, height: pixelH))
                 guard let resultCGImage = ctx.makeImage() else {
                     print("TEST FAIL: makeImage")
                     semaphore.signal()
                     return
                 }
-                let resultImage = NSImage(cgImage: resultCGImage, size: capturedNSImage.size)
                 print("Step3 rendered: \(resultCGImage.width)x\(resultCGImage.height) colorspace=\(resultCGImage.colorSpace?.name ?? "nil" as CFString)")
 
-                // Step 4: Save (same as saveImage)
-                guard let finalCGImage = resultImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-                    print("TEST FAIL: final cgImage")
+                // Step 4: Save using CGImageDestination to embed the correct color profile
+                let finalCGImage = resultCGImage
+                guard let destination = CGImageDestinationCreateWithURL(
+                    URL(fileURLWithPath: "/tmp/tool_output.png") as CFURL,
+                    UTType.png.identifier as CFString, 1, nil
+                ) else {
+                    print("TEST FAIL: destination")
                     semaphore.signal()
                     return
                 }
-                let rep = NSBitmapImageRep(cgImage: finalCGImage)
-                guard let pngData = rep.representation(using: .png, properties: [:]) else {
-                    print("TEST FAIL: PNG")
+                CGImageDestinationAddImage(destination, finalCGImage, [
+                    kCGImagePropertyDPIWidth: 72,
+                    kCGImagePropertyDPIHeight: 72,
+                ] as CFDictionary)
+                guard CGImageDestinationFinalize(destination) else {
+                    print("TEST FAIL: finalize")
                     semaphore.signal()
                     return
                 }
-                try pngData.write(to: URL(fileURLWithPath: "/tmp/tool_output.png"))
-                print("Step4 saved: \(pngData.count) bytes")
+                print("Step4 saved: done")
 
                 // Compare with system screenshot
                 let task = Process()

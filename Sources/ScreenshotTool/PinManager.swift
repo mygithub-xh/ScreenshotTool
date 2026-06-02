@@ -112,12 +112,19 @@ private class CloseButtonView: NSView {
 
 final class PinManager: NSObject {
 
+    private static let maxPins = 20
     private var pinnedWindows: [NSWindow] = []
 
     func pin(cgImage: CGImage, imageSize: NSSize, at origin: CGPoint) {
         guard imageSize.width > 0 && imageSize.height > 0 else {
             NSLog("[ScreenshotTool] PinManager: skipping pin with zero-size image")
             return
+        }
+
+        // Evict oldest pin if at limit to prevent unbounded memory growth
+        if pinnedWindows.count >= Self.maxPins {
+            let oldest = pinnedWindows.removeFirst()
+            oldest.orderOut(nil)
         }
 
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)

@@ -501,6 +501,7 @@ private class OverlayView: NSView {
             ctx.setLineWidth(2)
             ctx.setShadow(offset: .zero, blur: 8, color: NSColor.systemYellow.withAlphaComponent(0.5).cgColor)
             ctx.stroke(localRect)
+            ctx.setShadow(offset: .zero, blur: 0, color: nil)
         }
 
         // Crosshair + Color picker

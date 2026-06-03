@@ -220,6 +220,13 @@ private class OverlayView: NSView {
     private var selectionRect = CGRect.null
     private var highlightedWindowRect: CGRect?
 
+    // Color picker (during selecting mode)
+    private var pickedColor: NSColor?
+    private var colorCopyFeedback: String?
+    private var colorCopyFeedbackExpiry: DispatchWorkItem?
+    private let magnifierSize: CGFloat = 120
+    private let magnifierZoom: CGFloat = 8
+
     // MARK: - Adjust State (after selection, before confirm)
 
     private enum AdjustDrag { case none, move, resizeLeft, resizeRight, resizeTop, resizeBottom, resizeTopLeft, resizeTopRight, resizeBottomLeft, resizeBottomRight }
@@ -496,7 +503,7 @@ private class OverlayView: NSView {
             ctx.stroke(localRect)
         }
 
-        // Crosshair
+        // Crosshair + Color picker
         if !isSelecting {
             let mouseGlobal = NSEvent.mouseLocation
             let localPt = CGPoint(
@@ -504,15 +511,222 @@ private class OverlayView: NSView {
                 y: mouseGlobal.y - screenOffset.y
             )
             if bounds.contains(localPt) {
-                ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.35).cgColor)
+                // Subtle outer ring
+                ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.2).cgColor)
+                ctx.setLineWidth(1)
+                ctx.strokeEllipse(in: CGRect(x: localPt.x - 16, y: localPt.y - 16, width: 32, height: 32))
+
+                // Crosshair lines
+                ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.5).cgColor)
                 ctx.setLineWidth(0.5)
-                ctx.move(to: CGPoint(x: localPt.x - 12, y: localPt.y))
-                ctx.addLine(to: CGPoint(x: localPt.x + 12, y: localPt.y))
-                ctx.move(to: CGPoint(x: localPt.x, y: localPt.y - 12))
-                ctx.addLine(to: CGPoint(x: localPt.x, y: localPt.y + 12))
+                ctx.move(to: CGPoint(x: localPt.x - 14, y: localPt.y))
+                ctx.addLine(to: CGPoint(x: localPt.x + 14, y: localPt.y))
+                ctx.move(to: CGPoint(x: localPt.x, y: localPt.y - 14))
+                ctx.addLine(to: CGPoint(x: localPt.x, y: localPt.y + 14))
                 ctx.strokePath()
             }
+
+            // Color picker magnifier + info
+            drawColorPicker(ctx, at: localPt)
         }
+    }
+
+    // MARK: - Color Picker Drawing
+
+    private func drawColorPicker(_ ctx: CGContext, at localPt: CGPoint) {
+        guard let color = pickedColor else { return }
+        guard bounds.contains(localPt) else { return }
+
+        let gap: CGFloat = 14
+        let screenW = bounds.width
+        let screenH = bounds.height
+
+        // Position: prefer top-right of cursor
+        let panelW = magnifierSize
+        let panelH: CGFloat = 68
+        let totalH = magnifierSize + panelH
+        let magOnRight = localPt.x + gap + magnifierSize + 20 <= screenW
+        let magAbove = localPt.y - gap - totalH >= bounds.minY
+
+        let magX = magOnRight ? localPt.x + gap : localPt.x - gap - magnifierSize
+        let magY = magAbove ? localPt.y - gap - magnifierSize : localPt.y + gap + panelH
+        let magRect = CGRect(x: magX, y: magY, width: magnifierSize, height: magnifierSize)
+
+        // Panel flush with magnifier
+        let panelX = magX
+        let panelY = magAbove ? magY - panelH : magY + magnifierSize
+        let panelRect = CGRect(x: max(4, min(panelX, screenW - panelW - 4)),
+                               y: max(4, min(panelY, screenH - panelH - 4)),
+                               width: panelW, height: panelH)
+
+        // Draw zoomed pixels
+        let globalPt = globalPoint(localPt)
+        let halfSample = (magnifierSize / magnifierZoom) / 2
+
+        for (cgImage, screenFrame) in frozenBackgrounds {
+            guard screenFrame.contains(globalPt) else { continue }
+            let scale = CGFloat(cgImage.width) / screenFrame.width
+            let srcCx = (globalPt.x - screenFrame.origin.x) * scale
+            let srcCy = CGFloat(cgImage.height) - (globalPt.y - screenFrame.origin.y) * scale
+            let srcW = halfSample * 2 * scale
+            let srcH = halfSample * 2 * scale
+            let srcRect = CGRect(x: srcCx - srcW / 2, y: srcCy - srcH / 2, width: srcW, height: srcH)
+
+            guard let cropped = cgImage.cropping(to: srcRect) else { continue }
+
+            // Magnifier shadow
+            ctx.saveGState()
+            ctx.setShadow(offset: CGSize(width: 0, height: -2), blur: 16, color: NSColor.black.withAlphaComponent(0.5).cgColor)
+            ctx.setFillColor(NSColor.black.cgColor)
+            ctx.fill(magRect)
+            ctx.restoreGState()
+
+            // Clip and draw zoomed image
+            ctx.saveGState()
+            ctx.clip(to: magRect)
+            ctx.interpolationQuality = .none
+            ctx.draw(cropped, in: magRect)
+
+            // Pixel grid
+            let gridColor = NSColor.black.withAlphaComponent(0.12).cgColor
+            ctx.setStrokeColor(gridColor)
+            ctx.setLineWidth(0.5)
+            let pixelPt = magnifierSize / (halfSample * 2)
+            for i in 1..<Int(halfSample * 2) {
+                let offset = CGFloat(i) * pixelPt
+                ctx.move(to: CGPoint(x: magRect.minX + offset, y: magRect.minY))
+                ctx.addLine(to: CGPoint(x: magRect.minX + offset, y: magRect.maxY))
+                ctx.move(to: CGPoint(x: magRect.minX, y: magRect.minY + offset))
+                ctx.addLine(to: CGPoint(x: magRect.maxX, y: magRect.minY + offset))
+            }
+            ctx.strokePath()
+
+            // Border
+            ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.85).cgColor)
+            ctx.setLineWidth(2.5)
+            ctx.stroke(magRect)
+            ctx.restoreGState()
+
+            // Center ring
+            let cx = magRect.midX
+            let cy = magRect.midY
+            ctx.setStrokeColor(NSColor.white.cgColor)
+            ctx.setLineWidth(1.5)
+            let ringRadius: CGFloat = 5
+            ctx.strokeEllipse(in: CGRect(x: cx - ringRadius, y: cy - ringRadius,
+                                          width: ringRadius * 2, height: ringRadius * 2))
+
+            // Center crosshair
+            let chGap: CGFloat = ringRadius + 2
+            let chOuter: CGFloat = pixelPt * 1.2
+            ctx.setStrokeColor(NSColor.white.withAlphaComponent(0.7).cgColor)
+            ctx.setLineWidth(0.5)
+            let segments: [(CGFloat, CGFloat, CGFloat, CGFloat)] = [
+                (cx + chGap, cy, cx + chOuter, cy),
+                (cx - chGap, cy, cx - chOuter, cy),
+                (cx, cy + chGap, cx, cy + chOuter),
+                (cx, cy - chGap, cx, cy - chOuter),
+            ]
+            for (x1, y1, x2, y2) in segments {
+                ctx.move(to: CGPoint(x: x1, y: y1))
+                ctx.addLine(to: CGPoint(x: x2, y: y2))
+            }
+            ctx.strokePath()
+
+            // Center dot
+            ctx.setFillColor(NSColor.white.cgColor)
+            ctx.fill(CGRect(x: cx - 0.5, y: cy - 0.5, width: 1, height: 1))
+            break
+        }
+
+        // Panel background (white)
+        ctx.saveGState()
+        ctx.setShadow(offset: CGSize(width: 0, height: -2), blur: 12, color: NSColor.black.withAlphaComponent(0.2).cgColor)
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.fill(panelRect)
+        ctx.restoreGState()
+
+        // Panel border
+        ctx.setStrokeColor(NSColor.black.withAlphaComponent(0.1).cgColor)
+        ctx.setLineWidth(1)
+        ctx.stroke(panelRect)
+
+        // Color swatch
+        let swatchSize: CGFloat = 26
+        let swatchX = panelRect.minX + 8
+        let swatchY = panelRect.midY - swatchSize / 2
+        let swatchRect = CGRect(x: swatchX, y: swatchY, width: swatchSize, height: swatchSize)
+        let swatchPath = CGPath(roundedRect: swatchRect, cornerWidth: 5, cornerHeight: 5, transform: nil)
+        ctx.addPath(swatchPath)
+        ctx.setFillColor(color.cgColor)
+        ctx.fillPath()
+        ctx.setStrokeColor(NSColor.black.withAlphaComponent(0.15).cgColor)
+        ctx.setLineWidth(1)
+        ctx.addPath(swatchPath)
+        ctx.strokePath()
+
+        // HEX
+        let hexStr = colorHexString(color)
+        let hexFont = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .bold)
+        let hexX = swatchRect.maxX + 8
+        let hexY = panelRect.midY + 2
+        (hexStr as NSString).draw(at: CGPoint(x: hexX, y: hexY), withAttributes: [
+            .font: hexFont,
+            .foregroundColor: NSColor.black
+        ])
+
+        // RGB
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0
+        color.getRed(&r, green: &g, blue: &b, alpha: nil)
+        let rgbStr = String(format: "%.0f %.0f %.0f", r * 255, g * 255, b * 255)
+        let rgbFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+        let rgbY = panelRect.midY - 13
+        (rgbStr as NSString).draw(at: CGPoint(x: hexX, y: rgbY), withAttributes: [
+            .font: rgbFont,
+            .foregroundColor: NSColor.black.withAlphaComponent(0.55)
+        ])
+
+        // Hint text at bottom
+        let hintText = "按C复制色号"
+        let hintFont = NSFont.systemFont(ofSize: 9, weight: .regular)
+        let hintSize = (hintText as NSString).size(withAttributes: [.font: hintFont])
+        let hintX = panelRect.midX - hintSize.width / 2
+        let hintY = panelRect.minY + 4
+        (hintText as NSString).draw(at: CGPoint(x: hintX, y: hintY), withAttributes: [
+            .font: hintFont,
+            .foregroundColor: NSColor.black.withAlphaComponent(0.3)
+        ])
+
+        // Copy feedback toast
+        if let feedback = colorCopyFeedback {
+            let fbFont = NSFont.systemFont(ofSize: 12, weight: .medium)
+            let fbSize = (feedback as NSString).size(withAttributes: [.font: fbFont])
+            let fbPad: CGFloat = 10
+            let fbX = panelRect.midX - (fbSize.width + fbPad * 2) / 2
+            let fbY = magAbove ? panelRect.minY - fbSize.height - 10 : panelRect.maxY + 10
+            let fbRect = CGRect(x: fbX, y: fbY, width: fbSize.width + fbPad * 2, height: fbSize.height + 6)
+            let fbPath = CGPath(roundedRect: fbRect, cornerWidth: 4, cornerHeight: 4, transform: nil)
+
+            ctx.saveGState()
+            ctx.setShadow(offset: CGSize(width: 0, height: -1), blur: 6, color: NSColor.black.withAlphaComponent(0.3).cgColor)
+            ctx.setFillColor(NSColor.white.cgColor)
+            ctx.addPath(fbPath)
+            ctx.fillPath()
+            ctx.restoreGState()
+
+            (feedback as NSString).draw(at: CGPoint(x: fbX + fbPad, y: fbY + 3), withAttributes: [
+                .font: fbFont,
+                .foregroundColor: NSColor.black
+            ])
+        }
+    }
+
+    private func colorHexString(_ color: NSColor) -> String {
+        guard let rgb = color.usingColorSpace(.deviceRGB) else { return "#??????" }
+        let r = Int(round(rgb.redComponent * 255))
+        let g = Int(round(rgb.greenComponent * 255))
+        let b = Int(round(rgb.blueComponent * 255))
+        return String(format: "#%02X%02X%02X", r, g, b)
     }
 
     // MARK: - Adjusting Drawing
@@ -788,6 +1002,45 @@ private class OverlayView: NSView {
         )
     }
 
+    // MARK: - Pixel Color Sampling
+
+    private func sampleColor(at localPt: CGPoint) -> NSColor? {
+        let globalPt = globalPoint(localPt)
+        for (cgImage, screenFrame) in frozenBackgrounds {
+            guard screenFrame.contains(globalPt) else { continue }
+            let scale = CGFloat(cgImage.width) / screenFrame.width
+            let px = Int(round((globalPt.x - screenFrame.origin.x) * scale))
+            let py = Int(round((screenFrame.origin.y + screenFrame.height - globalPt.y) * scale))
+            guard px >= 0, py >= 0, px < cgImage.width, py < cgImage.height else { return nil }
+
+            guard let data = cgImage.dataProvider?.data else { return nil }
+            let bytes = CFDataGetBytePtr(data)
+            let bpr = cgImage.bytesPerRow
+            let bpp = cgImage.bitsPerPixel / 8
+            let offset = py * bpr + px * bpp
+
+            let ri: Int, gi: Int, bi: Int, ai: Int
+            let byteOrder = cgImage.bitmapInfo.intersection(.byteOrderMask)
+            if byteOrder == .byteOrder32Little {
+                // BGRA
+                ri = 2; gi = 1; bi = 0; ai = 3
+            } else {
+                // RGBA (byteOrder32Big or default)
+                ri = 0; gi = 1; bi = 2; ai = 3
+            }
+
+            let r = CGFloat(bytes?[offset + ri] ?? 0) / 255.0
+            let g = CGFloat(bytes?[offset + gi] ?? 0) / 255.0
+            let b = CGFloat(bytes?[offset + bi] ?? 0) / 255.0
+            let a = bpp >= 4 ? CGFloat(bytes?[offset + ai] ?? 255) / 255.0 : 1.0
+
+            let cgCS = cgImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+            let nsCS = NSColorSpace(cgColorSpace: cgCS)!
+            return NSColor(colorSpace: nsCS, components: [r, g, b, a], count: 4)
+        }
+        return nil
+    }
+
     // MARK: - Arrow Drawing
 
     private func drawArrow(_ annotation: AnnotationItem, in ctx: CGContext) {
@@ -845,6 +1098,12 @@ private class OverlayView: NSView {
 
     // MARK: - Number Drawing
 
+    private func textColorForFillColor(_ color: NSColor) -> NSColor {
+        guard let rgb = color.usingColorSpace(.sRGB) else { return .white }
+        let luminance = 0.299 * rgb.redComponent + 0.587 * rgb.greenComponent + 0.114 * rgb.blueComponent
+        return luminance > 0.5 ? .black : .white
+    }
+
     private func drawNumber(_ annotation: AnnotationItem, in ctx: CGContext) {
         let point = imageToView(annotation.startPoint)
         let radius: CGFloat = 14
@@ -861,9 +1120,10 @@ private class OverlayView: NSView {
 
         let text = "\(annotation.number)"
         let font = NSFont.boldSystemFont(ofSize: 14)
+        let textColor = textColorForFillColor(annotation.color)
         let textAttrs: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: NSColor.white,
+            .foregroundColor: textColor,
         ]
         let attrStr = NSAttributedString(string: text, attributes: textAttrs)
         let line = CTLineCreateWithAttributedString(attrStr)
@@ -1361,18 +1621,21 @@ private class OverlayView: NSView {
         guard !isSelecting else { return }
         NSCursor.crosshair.set()
 
-        let globalPt = globalPoint(event.locationInWindow)
+        let localPt = event.locationInWindow
+        let picked = sampleColor(at: localPt)
+        pickedColor = picked
+
+        let globalPt = globalPoint(localPt)
         if let winRect = WindowDetector.windowAtPoint(globalPt, excluding: window?.windowNumber) {
             if highlightedWindowRect != winRect {
                 highlightedWindowRect = winRect
-                needsDisplay = true
             }
         } else {
             if highlightedWindowRect != nil {
                 highlightedWindowRect = nil
-                needsDisplay = true
             }
         }
+        needsDisplay = true
     }
 
     // MARK: - Adjusting Mouse Events
@@ -1998,6 +2261,28 @@ private class OverlayView: NSView {
             }
         }
 
+        // C key — copy color in selecting mode
+        if mode == .selecting || mode == .adjusting {
+            if let chars = event.charactersIgnoringModifiers, chars.lowercased() == "c" {
+                if let color = pickedColor {
+                    let hex = colorHexString(color)
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(hex, forType: .string)
+                    colorCopyFeedback = "已复制 \(hex)"
+                    colorCopyFeedbackExpiry?.cancel()
+                    let work = DispatchWorkItem { [weak self] in
+                        self?.colorCopyFeedback = nil
+                        self?.needsDisplay = true
+                    }
+                    colorCopyFeedbackExpiry = work
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: work)
+                    needsDisplay = true
+                }
+                return
+            }
+        }
+
         if event.keyCode == 53 { // Escape
             if mode == .annotating {
                 if activeTextField != nil {
@@ -2194,9 +2479,10 @@ private class OverlayView: NSView {
 
             let text = "\(annotation.number)"
             let font = NSFont.boldSystemFont(ofSize: 14)
+            let textColor = textColorForFillColor(annotation.color)
             let textAttrs: [NSAttributedString.Key: Any] = [
                 .font: font,
-                .foregroundColor: NSColor.white,
+                .foregroundColor: textColor,
             ]
             let attrStr = NSAttributedString(string: text, attributes: textAttrs)
             let line = CTLineCreateWithAttributedString(attrStr)

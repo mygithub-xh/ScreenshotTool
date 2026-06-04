@@ -544,7 +544,7 @@ private class OverlayView: NSView {
 
         // Position: prefer top-right of cursor
         let panelW = magnifierSize
-        let panelH: CGFloat = 68
+        let panelH: CGFloat = 62
         let totalH = magnifierSize + panelH
         let magOnRight = localPt.x + gap + magnifierSize + 20 <= screenW
         let magAbove = localPt.y - gap - totalH >= bounds.minY
@@ -653,11 +653,11 @@ private class OverlayView: NSView {
         ctx.stroke(panelRect)
 
         // Color swatch
-        let swatchSize: CGFloat = 26
+        let swatchSize: CGFloat = 22
         let swatchX = panelRect.minX + 8
         let swatchY = panelRect.midY - swatchSize / 2
         let swatchRect = CGRect(x: swatchX, y: swatchY, width: swatchSize, height: swatchSize)
-        let swatchPath = CGPath(roundedRect: swatchRect, cornerWidth: 5, cornerHeight: 5, transform: nil)
+        let swatchPath = CGPath(roundedRect: swatchRect, cornerWidth: 4, cornerHeight: 4, transform: nil)
         ctx.addPath(swatchPath)
         ctx.setFillColor(color.cgColor)
         ctx.fillPath()
@@ -666,36 +666,49 @@ private class OverlayView: NSView {
         ctx.addPath(swatchPath)
         ctx.strokePath()
 
-        // HEX
+        let textX = swatchRect.maxX + 8
+
+        // Row 1: HEX
         let hexStr = colorHexString(color)
-        let hexFont = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .bold)
-        let hexX = swatchRect.maxX + 8
-        let hexY = panelRect.midY + 2
-        (hexStr as NSString).draw(at: CGPoint(x: hexX, y: hexY), withAttributes: [
+        let hexFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold)
+        let hexY = panelRect.midY + 8
+        (hexStr as NSString).draw(at: CGPoint(x: textX, y: hexY), withAttributes: [
             .font: hexFont,
             .foregroundColor: NSColor.black
         ])
 
-        // RGB
+        // Row 2: RGB
         var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0
         color.getRed(&r, green: &g, blue: &b, alpha: nil)
-        let rgbStr = String(format: "%.0f %.0f %.0f", r * 255, g * 255, b * 255)
-        let rgbFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular)
-        let rgbY = panelRect.midY - 13
-        (rgbStr as NSString).draw(at: CGPoint(x: hexX, y: rgbY), withAttributes: [
+        let rgbStr = String(format: "%.0f  %.0f  %.0f", r * 255, g * 255, b * 255)
+        let rgbFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        let rgbY = panelRect.midY - 4
+        (rgbStr as NSString).draw(at: CGPoint(x: textX, y: rgbY), withAttributes: [
             .font: rgbFont,
-            .foregroundColor: NSColor.black.withAlphaComponent(0.55)
+            .foregroundColor: NSColor.black.withAlphaComponent(0.45)
         ])
 
-        // Hint text at bottom
-        let hintText = "按C复制色号"
+        // Row 3: Coordinates (top-left origin)
+        let mousePos = NSEvent.mouseLocation
+        let primaryH = NSScreen.main?.frame.height ?? 0
+        let tlY = Int(primaryH - mousePos.y)
+        let coordStr = "(\(Int(mousePos.x)), \(tlY))"
+        let coordFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        let coordY = panelRect.midY - 16
+        (coordStr as NSString).draw(at: CGPoint(x: textX, y: coordY), withAttributes: [
+            .font: coordFont,
+            .foregroundColor: NSColor.black.withAlphaComponent(0.45)
+        ])
+
+        // Hint
+        let hintText = "按 C 复制色号"
         let hintFont = NSFont.systemFont(ofSize: 9, weight: .regular)
         let hintSize = (hintText as NSString).size(withAttributes: [.font: hintFont])
         let hintX = panelRect.midX - hintSize.width / 2
         let hintY = panelRect.minY + 4
         (hintText as NSString).draw(at: CGPoint(x: hintX, y: hintY), withAttributes: [
             .font: hintFont,
-            .foregroundColor: NSColor.black.withAlphaComponent(0.3)
+            .foregroundColor: NSColor.black.withAlphaComponent(0.25)
         ])
 
         // Copy feedback toast
